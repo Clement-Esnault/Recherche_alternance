@@ -180,9 +180,22 @@ def main():
     seen_ids = {row[0] for row in conn.execute("SELECT id FROM seen")}
 
     all_offers = fetch_lba_offers() + fetch_adzuna_offers() + fetch_jooble_offers()
-    new_count = 0
 
+    # LBA est déjà filtré finement (ROME + diplôme) : on lui fait confiance.
+    # Adzuna/Jooble font une recherche plein-texte plus permissive : on exige
+    # que "alternance" ou "apprenti" apparaisse vraiment dans le titre pour
+    # éliminer les faux positifs (infirmier, office manager, etc.).
+    filtered_offers = []
     for offer in all_offers:
+        if offer["source"] == "La Bonne Alternance":
+            filtered_offers.append(offer)
+            continue
+        title_lower = offer["title"].lower()
+        if "alternance" in title_lower or "apprenti" in title_lower:
+            filtered_offers.append(offer)
+
+    new_count = 0
+    for offer in filtered_offers:
         if offer["id"] in seen_ids:
             continue
         send_discord_notification(offer)
@@ -191,7 +204,7 @@ def main():
 
     conn.commit()
     conn.close()
-    print(f"{new_count} nouvelle(s) offre(s) sur {len(all_offers)} au total (toutes sources).")
+    print(f"{new_count} nouvelle(s) offre(s) sur {len(filtered_offers)} pertinente(s) ({len(all_offers)} brutes, toutes sources).")
 
 
 if __name__ == "__main__":

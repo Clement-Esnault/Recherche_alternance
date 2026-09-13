@@ -2,7 +2,7 @@ name: Alternance Watcher
 
 on:
   schedule:
-    - cron: "0 * * * *"  # toutes les heures, pile
+    - cron: "0 */3 * * *"  # toutes les 3 heures
   workflow_dispatch: {}   # bouton "Run workflow" manuel sur GitHub
 
 jobs:
