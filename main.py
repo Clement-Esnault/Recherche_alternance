@@ -200,15 +200,14 @@ def fetch_jooble_offers():
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS seen (
-            id TEXT PRIMARY KEY,
-            title TEXT,
-            company TEXT,
-            source TEXT,
-            first_seen TEXT
-        )
-    """)
+    conn.execute("CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY)")
+    # Migration : ajoute les colonnes manquantes si la base vient d'un cache
+    # créé par une version antérieure du script (ex: schéma id-only).
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(seen)")}
+    for col in ("title", "company", "source", "first_seen"):
+        if col not in existing_cols:
+            conn.execute(f"ALTER TABLE seen ADD COLUMN {col} TEXT")
+            log.info("Migration DB : colonne '%s' ajoutée à seen_offers.db", col)
     conn.commit()
     return conn
 
