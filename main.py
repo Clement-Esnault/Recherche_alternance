@@ -25,6 +25,9 @@ logging.basicConfig(
 log = logging.getLogger("watcher")
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+# Second webhook optionnel pour les offres de stage (si vide, tout part sur
+# le webhook principal).
+DISCORD_WEBHOOK_STAGE_URL = os.getenv("DISCORD_WEBHOOK_STAGE_URL") or DISCORD_WEBHOOK_URL
 DB_PATH = os.path.join(os.path.dirname(__file__), "seen_offers.db")
 PURGE_AFTER_DAYS = int(os.getenv("PURGE_AFTER_DAYS", "60"))
 DIGEST_THRESHOLD = int(os.getenv("DIGEST_THRESHOLD", "8"))
@@ -95,16 +98,20 @@ def fetch_lba_offers():
 
     raw_offers = data.get("jobs", [])
     log.info("[LBA] %d offre(s) active(s), %d recruteur(s) spontané(s)", len(raw_offers), len(data.get("recruiters", [])))
+    diploma_labels = {"3": "CAP", "4": "Bac", "5": "Bac+2", "6": "Bac+3/Licence", "7": "Bac+5"}
     normalized = []
     for o in raw_offers:
         ident = o.get("identifier", {})
         offer_id = ident.get("id") or ident.get("partner_job_id")
+        diploma_code = (o.get("offer", {}).get("target_diploma") or {}).get("european")
         normalized.append({
             "id": f"lba:{ident.get('partner_label', '')}:{offer_id}",
             "title": o.get("offer", {}).get("title", "Offre alternance"),
             "company": o.get("workplace", {}).get("name", "Entreprise inconnue"),
             "city": o.get("workplace", {}).get("location", {}).get("address", ""),
             "url": o.get("apply", {}).get("url", ""),
+            "phone": o.get("apply", {}).get("phone", ""),
+            "diploma": diploma_labels.get(diploma_code, ""),
             "source": "La Bonne Alternance",
         })
     return normalized
@@ -124,7 +131,7 @@ def fetch_adzuna_offers():
         "app_key": ADZUNA_APP_KEY,
         "results_per_page": 50,
         "category": "it-jobs",
-        "what": "alternance",
+        "what_or": "alternance stage",
         "where": CITY,
         "distance": RADIUS_KM,
         "content-type": "application/json",
@@ -166,7 +173,7 @@ def fetch_jooble_offers():
     if not JOOBLE_API_KEY:
         return []
     url = f"https://jooble.org/api/{JOOBLE_API_KEY}"
-    payload = {"keywords": "alternance informatique développeur", "location": f"{CITY}, France", "radius": int(RADIUS_KM)}
+    payload = {"keywords": "alternance stage informatique développeur", "location": f"{CITY}, France", "radius": int(RADIUS_KM)}
     try:
         resp = request_with_retry("POST", url, json=payload, timeout=20)
     except requests.RequestException as e:
@@ -222,49 +229,72 @@ def purge_old_entries(conn):
 
 # ---------- Discord ----------
 
-def send_discord_notification(offer: dict):
+def send_discord_notification(offer: dict, webhook_url: str):
+    extra = []
+    if offer.get("diploma"):
+        extra.append(f"Niveau visé : {offer['diploma']}")
+    if offer.get("phone"):
+        extra.append(f"Tél : {offer['phone']}")
+    description = f"**{offer['company']}**\n{offer['city']}"
+    if extra:
+        description += "\n" + " · ".join(extra)
     payload = {
         "embeds": [{
             "title": offer["title"],
-            "description": f"**{offer['company']}**\n{offer['city']}",
+            "description": description,
             "url": offer["url"] or None,
             "footer": {"text": offer["source"]},
             "color": 5814783,
         }]
     }
     try:
-        resp = request_with_retry("POST", DISCORD_WEBHOOK_URL, json=payload, timeout=10)
+        resp = request_with_retry("POST", webhook_url, json=payload, timeout=10)
         if resp.status_code >= 300:
             log.warning("[Discord] status=%s body=%s", resp.status_code, resp.text[:300])
     except requests.RequestException as e:
         log.error("[Discord] échec après retries : %s", e)
 
 
-def send_discord_digest(offers: list):
+def send_discord_digest(offers: list, webhook_url: str, title: str):
     # Un embed Discord ne supporte que 25 champs max : on découpe en paquets.
     for i in range(0, len(offers), 25):
         chunk = offers[i:i + 25]
         fields = [
             {
                 "name": o["title"][:256],
-                "value": f"{o['company']} — {o['city']}\n[Voir l'offre]({o['url']}) · _{o['source']}_"[:1024],
+                "value": (
+                    f"{o['company']} — {o['city']}"
+                    + (f" · {o['diploma']}" if o.get("diploma") else "")
+                    + f"\n[Voir l'offre]({o['url']}) · _{o['source']}_"
+                )[:1024],
                 "inline": False,
             }
             for o in chunk
         ]
         payload = {
             "embeds": [{
-                "title": f"{len(offers)} nouvelles offres d'alternance",
+                "title": title,
                 "color": 5814783,
                 "fields": fields,
             }]
         }
         try:
-            resp = request_with_retry("POST", DISCORD_WEBHOOK_URL, json=payload, timeout=10)
+            resp = request_with_retry("POST", webhook_url, json=payload, timeout=10)
             if resp.status_code >= 300:
                 log.warning("[Discord] status=%s body=%s", resp.status_code, resp.text[:300])
         except requests.RequestException as e:
             log.error("[Discord] échec après retries : %s", e)
+
+
+def notify_group(offers: list, webhook_url: str, label: str):
+    if not offers:
+        return
+    if len(offers) > DIGEST_THRESHOLD:
+        log.info("Envoi d'un digest groupé — %s (%d offres)", label, len(offers))
+        send_discord_digest(offers, webhook_url, title=f"{len(offers)} nouvelles offres — {label}")
+    else:
+        for offer in offers:
+            send_discord_notification(offer, webhook_url)
 
 
 # ---------- Main ----------
@@ -295,23 +325,28 @@ def main():
             filtered_offers.append(offer)
             continue
         title_lower = offer["title"].lower()
-        if "alternance" in title_lower or "apprenti" in title_lower:
+        if "alternance" in title_lower or "apprenti" in title_lower or "stage" in title_lower:
             filtered_offers.append(offer)
 
     new_offers = [o for o in filtered_offers if o["id"] not in seen_ids]
 
+    # Route vers le channel "stage" les offres dont le titre mentionne un
+    # stage sans mentionner alternance/apprentissage ; le reste va sur le
+    # channel principal.
+    stage_offers, main_offers = [], []
+    for o in new_offers:
+        title_lower = o["title"].lower()
+        is_stage_only = "stage" in title_lower and "alternance" not in title_lower and "apprenti" not in title_lower
+        (stage_offers if is_stage_only else main_offers).append(o)
+
     if new_offers:
         if DRY_RUN:
-            log.info("[DRY_RUN] %d nouvelle(s) offre(s) qui auraient été notifiées :", len(new_offers))
+            log.info("[DRY_RUN] %d offre(s) alternance, %d offre(s) stage — rien n'est envoyé :", len(main_offers), len(stage_offers))
             for o in new_offers:
                 log.info("  - %s — %s (%s)", o["title"], o["company"], o["source"])
         else:
-            if len(new_offers) > DIGEST_THRESHOLD:
-                log.info("Envoi d'un digest groupé (%d offres)", len(new_offers))
-                send_discord_digest(new_offers)
-            else:
-                for offer in new_offers:
-                    send_discord_notification(offer)
+            notify_group(main_offers, DISCORD_WEBHOOK_URL, "Alternance")
+            notify_group(stage_offers, DISCORD_WEBHOOK_STAGE_URL, "Stage")
 
             now = datetime.now(timezone.utc).isoformat()
             conn.executemany(
