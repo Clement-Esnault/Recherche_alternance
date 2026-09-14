@@ -1,49 +1,72 @@
 # Alternance Watcher
 
-Check les nouvelles offres d'alternance (API La Bonne Alternance = France Travail,
-Indeed, Hellowork, Monster, etc. agrégés) et ping un webhook Discord pour chaque
-nouvelle offre. Pas d'interface, juste des notifs.
+![Alternance Watcher](https://github.com/Clement-Esnault/Recherche_alternance/actions/workflows/watcher.yml/badge.svg)
 
-## Sources agrégées
+Script qui surveille les nouvelles offres d'alternance (informatique, zone
+Caen/Bayeux/Creully par défaut, personnalisable) sur 3 sources et ping un
+webhook Discord dès qu'une offre pertinente apparaît. Tourne en continu sur
+GitHub Actions — pas besoin de garder un PC ou un serveur allumé.
 
-- **La Bonne Alternance** (service public) — agrège déjà France Travail, Hellowork,
-  Monster, Apec, Météojob, Le Bon Coin et ~100 autres partenaires
-- **Adzuna** — agrégateur indépendant, couvre d'autres boards (LinkedIn, Indeed, etc. selon les accords)
-- **Jooble** — même principe, sources différentes
+## Sources
 
-Chaque source est optionnelle : si tu ne remplis pas ses clés API dans `.env`, elle est juste skip.
+- **[La Bonne Alternance](https://api.apprentissage.beta.gouv.fr/fr/documentation-technique)**
+  (service public) — agrège France Travail et ~100 partenaires (Hellowork,
+  Monster, Apec, Météojob...). Filtrée par code ROME + niveau de diplôme.
+- **[Adzuna](https://developer.adzuna.com/signup)** — agrégateur indépendant,
+  filtré par catégorie "IT jobs" + mot-clé "alternance".
+- **[Jooble](https://jooble.org/api/about)** — même principe, autre pool de
+  données.
 
-## Setup
+Chaque source est indépendante et optionnelle : si sa clé API n'est pas
+configurée, elle est simplement ignorée (les autres continuent de tourner).
 
-1. **La Bonne Alternance** : crée un compte et récupère un token sur
-   https://api.apprentissage.beta.gouv.fr/fr/compte/profil
-2. **Adzuna** : inscription gratuite sur https://developer.adzuna.com/signup
-3. **Jooble** : clé gratuite sur https://jooble.org/api/about
-4. **Discord** : crée un webhook dans le salon voulu (Paramètres du salon > Intégrations > Webhooks)
-5. `cp .env.example .env` puis remplis les clés que tu as
-6. `pip install -r requirements.txt`
-7. Avant le premier run réel : va sur le swagger LBA (lien dans `main.py`) pour vérifier
-   le path exact de la route de recherche et le nom des champs de la réponse JSON
-   (`LBA_SEARCH_PATH` et le parsing dans `fetch_lba_offers` sont à ajuster
-   en fonction — je n'avais pas accès au swagger interactif qui nécessite le token).
-8. Test : `python main.py`
+Pour Adzuna et Jooble, dont la recherche est en plein texte (donc plus
+bruitée), le script exige que le mot "alternance" ou "apprenti" apparaisse
+dans le titre avant de notifier — évite le bruit type offres CDI ou sans
+rapport. La Bonne Alternance est déjà filtrée finement en amont (ROME +
+diplôme), donc pas re-filtrée.
 
-## Lancer en automatique (cron, toutes les 30 min)
+## Déduplication
 
-```
-crontab -e
-```
+`seen_offers.db` (SQLite) garde la liste des offres déjà notifiées. Sur
+GitHub Actions, ce fichier est sauvegardé/restauré entre chaque run via
+`actions/cache` — sans ça, chaque run serait "à froid" et re-notifierait
+tout.
 
-Ajoute :
+## Setup local (pour tester)
 
-```
-*/30 * * * * cd /chemin/vers/alternance-watcher && /usr/bin/python3 main.py >> watcher.log 2>&1
-```
+1. `cp .env.example .env` et remplis les clés (voir les liens d'inscription
+   dans le fichier — toutes gratuites)
+2. `pip install -r requirements.txt`
+3. `python main.py`
 
-## Notes
+Pour itérer sur les critères de recherche (mots-clés, codes ROME...) sans
+polluer ton Discord ni marquer des offres comme "vues", passe `DRY_RUN=true`
+dans ton `.env` : le script affiche ce qu'il aurait envoyé, sans rien
+envoyer ni écrire en base.
 
-- `seen_offers.db` (SQLite) garde en mémoire les offres déjà notifiées pour éviter les doublons.
-- Usage de l'API réservé aux usages non lucratifs (pas de revente/facturation des données).
-- Si tu veux élargir au-delà de La Bonne Alternance (LinkedIn, Indeed direct, etc.),
-  ces sites n'ont pas d'API publique gratuite — faudrait du scraping, plus fragile
-  et limite niveau CGU.
+## Déploiement GitHub Actions (production, tourne tout seul)
+
+1. Push ce repo sur GitHub (le `.gitignore` protège déjà `.env` et
+   `seen_offers.db` — ne les commit jamais)
+2. Repo GitHub > Settings > Secrets and variables > Actions > crée un secret
+   pour chaque clé : `LBA_API_TOKEN`, `ADZUNA_APP_ID`, `ADZUNA_APP_KEY`,
+   `JOOBLE_API_KEY`, `DISCORD_WEBHOOK_URL`
+3. Le workflow `.github/workflows/watcher.yml` tourne automatiquement toutes
+   les 3h (`cron: "0 */3 * * *"`) — modifiable directement dans ce fichier
+4. Test manuel : onglet **Actions** du repo > "Alternance Watcher" >
+   "Run workflow"
+
+Les critères de recherche (ville, rayon, codes ROME, mots-clés) sont
+codés en dur dans le bloc `env:` de `watcher.yml` — à adapter à ta zone et
+ton profil si tu réutilises ce projet.
+
+## Limites connues
+
+- LinkedIn et Indeed en direct n'ont pas d'API gratuite — non couverts (LBA
+  et Adzuna les intègrent parfois indirectement via leurs partenariats).
+- L'API La Bonne Alternance peut renvoyer 0 offre "active" tout en montrant
+  des "recruteurs à fort potentiel" — c'est un signal du marché local, pas
+  un bug.
+- Jooble a un quota de 500 requêtes (période non précisée par leur équipe) —
+  surveille les logs si tu resserres le cron en dessous de 3h.
