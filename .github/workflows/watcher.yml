@@ -36,6 +36,7 @@ jobs:
           ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
           JOOBLE_API_KEY: ${{ secrets.JOOBLE_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_STAGE_URL: ${{ secrets.DISCORD_WEBHOOK_STAGE_URL }}
           CITY: "Caen"
           LATITUDE: "49.2667"
           LONGITUDE: "-0.4500"
