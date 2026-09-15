@@ -68,53 +68,57 @@ LBA_API_BASE = "https://api.apprentissage.beta.gouv.fr/api"
 LBA_SEARCH_PATH = "/job/v1/search"
 LBA_TOKEN = os.getenv("LBA_API_TOKEN")
 ROME_CODES = os.getenv("ROME_CODES", "M1805,M1802,M1801,M1810,M1806")
-TARGET_DIPLOMA_LEVEL = os.getenv("TARGET_DIPLOMA_LEVEL", "6")  # 6 = Bac+3 (Licence/BUT3)
+# L'API n'accepte qu'un seul niveau de diplôme par appel : on boucle sur
+# chaque niveau demandé et on fusionne les résultats (dédupliqués par id).
+TARGET_DIPLOMA_LEVELS = [l.strip() for l in os.getenv("TARGET_DIPLOMA_LEVELS", "5,6").split(",") if l.strip()]
+DIPLOMA_LABELS = {"3": "CAP", "4": "Bac", "5": "Bac+2", "6": "Bac+3/Licence", "7": "Bac+5"}
 
 
 def fetch_lba_offers():
     if not LBA_TOKEN:
         return []
-    params = {
-        "romes": ROME_CODES,
-        "radius": RADIUS_KM,
-        "latitude": LATITUDE,
-        "longitude": LONGITUDE,
-        "target_diploma_level": TARGET_DIPLOMA_LEVEL,
-    }
     headers = {"Authorization": f"Bearer {LBA_TOKEN}"}
-    try:
-        resp = request_with_retry("GET", LBA_API_BASE + LBA_SEARCH_PATH, params=params, headers=headers, timeout=20)
-    except requests.RequestException as e:
-        log.error("[LBA] échec après retries : %s", e)
-        return []
+    by_id = {}
+    for level in TARGET_DIPLOMA_LEVELS:
+        params = {
+            "romes": ROME_CODES,
+            "radius": RADIUS_KM,
+            "latitude": LATITUDE,
+            "longitude": LONGITUDE,
+            "target_diploma_level": level,
+        }
+        try:
+            resp = request_with_retry("GET", LBA_API_BASE + LBA_SEARCH_PATH, params=params, headers=headers, timeout=20)
+        except requests.RequestException as e:
+            log.error("[LBA] échec après retries (niveau %s) : %s", level, e)
+            continue
 
-    if resp.status_code in (401, 403):
-        log.error("[LBA] clé invalide ou expirée (LBA_API_TOKEN) — status %s", resp.status_code)
-        return []
-    if resp.status_code != 200 or not resp.text.strip():
-        log.warning("[LBA] status=%s body=%r", resp.status_code, resp.text[:500])
-        return []
-    data = resp.json()
+        if resp.status_code in (401, 403):
+            log.error("[LBA] clé invalide ou expirée (LBA_API_TOKEN) — status %s", resp.status_code)
+            return []
+        if resp.status_code != 200 or not resp.text.strip():
+            log.warning("[LBA] status=%s body=%r (niveau %s)", resp.status_code, resp.text[:500], level)
+            continue
+        data = resp.json()
 
-    raw_offers = data.get("jobs", [])
-    log.info("[LBA] %d offre(s) active(s), %d recruteur(s) spontané(s)", len(raw_offers), len(data.get("recruiters", [])))
-    diploma_labels = {"3": "CAP", "4": "Bac", "5": "Bac+2", "6": "Bac+3/Licence", "7": "Bac+5"}
-    normalized = []
-    for o in raw_offers:
-        ident = o.get("identifier", {})
-        offer_id = ident.get("id") or ident.get("partner_job_id")
-        diploma_code = (o.get("offer", {}).get("target_diploma") or {}).get("european")
-        normalized.append({
-            "id": f"lba:{ident.get('partner_label', '')}:{offer_id}",
-            "title": o.get("offer", {}).get("title", "Offre alternance"),
-            "company": o.get("workplace", {}).get("name", "Entreprise inconnue"),
-            "city": o.get("workplace", {}).get("location", {}).get("address", ""),
-            "url": o.get("apply", {}).get("url", ""),
-            "phone": o.get("apply", {}).get("phone", ""),
-            "diploma": diploma_labels.get(diploma_code, ""),
-            "source": "La Bonne Alternance",
-        })
-    return normalized
+        raw_offers = data.get("jobs", [])
+        log.info("[LBA] niveau %s (%s) : %d offre(s)", level, DIPLOMA_LABELS.get(level, "?"), len(raw_offers))
+        for o in raw_offers:
+            ident = o.get("identifier", {})
+            offer_id = ident.get("id") or ident.get("partner_job_id")
+            diploma_code = (o.get("offer", {}).get("target_diploma") or {}).get("european")
+            full_id = f"lba:{ident.get('partner_label', '')}:{offer_id}"
+            by_id[full_id] = {
+                "id": full_id,
+                "title": o.get("offer", {}).get("title", "Offre alternance"),
+                "company": o.get("workplace", {}).get("name", "Entreprise inconnue"),
+                "city": o.get("workplace", {}).get("location", {}).get("address", ""),
+                "url": o.get("apply", {}).get("url", ""),
+                "phone": o.get("apply", {}).get("phone", ""),
+                "diploma": DIPLOMA_LABELS.get(diploma_code, ""),
+                "source": "La Bonne Alternance",
+            }
+    return list(by_id.values())
 
 
 # ---------- Source 2 : Adzuna ----------
@@ -230,14 +234,12 @@ def purge_old_entries(conn):
 # ---------- Discord ----------
 
 def send_discord_notification(offer: dict, webhook_url: str):
-    extra = []
+    extra = [f"Type : {offer.get('type_label', '?')}"]
     if offer.get("diploma"):
         extra.append(f"Niveau visé : {offer['diploma']}")
     if offer.get("phone"):
         extra.append(f"Tél : {offer['phone']}")
-    description = f"**{offer['company']}**\n{offer['city']}"
-    if extra:
-        description += "\n" + " · ".join(extra)
+    description = f"**{offer['company']}**\n{offer['city']}\n" + " · ".join(extra)
     payload = {
         "embeds": [{
             "title": offer["title"],
@@ -265,6 +267,7 @@ def send_discord_digest(offers: list, webhook_url: str, title: str):
                 "value": (
                     f"{o['company']} — {o['city']}"
                     + (f" · {o['diploma']}" if o.get("diploma") else "")
+                    + f"\n🏷️ {o.get('type_label', '?')}"
                     + f"\n[Voir l'offre]({o['url']}) · _{o['source']}_"
                 )[:1024],
                 "inline": False,
@@ -312,6 +315,8 @@ def main():
     seen_ids = {row[0] for row in conn.execute("SELECT id FROM seen")}
 
     all_offers = fetch_lba_offers() + fetch_adzuna_offers() + fetch_jooble_offers()
+    for o in all_offers:
+        log.debug("[raw] %s — %s", o["title"], o["source"])
 
     # LBA est déjà filtré finement (ROME + diplôme), Adzuna déjà filtré par
     # son propre paramètre what="alternance" (le mot apparaît dans l'annonce,
@@ -337,9 +342,11 @@ def main():
     for o in new_offers:
         title_lower = o["title"].lower()
         is_stage_only = "stage" in title_lower and "alternance" not in title_lower and "apprenti" not in title_lower
+        o["type_label"] = "Stage" if is_stage_only else "Alternance"
         (stage_offers if is_stage_only else main_offers).append(o)
 
     if new_offers:
+        log.info("Répartition : %d alternance, %d stage", len(main_offers), len(stage_offers))
         if DRY_RUN:
             log.info("[DRY_RUN] %d offre(s) alternance, %d offre(s) stage — rien n'est envoyé :", len(main_offers), len(stage_offers))
             for o in new_offers:
