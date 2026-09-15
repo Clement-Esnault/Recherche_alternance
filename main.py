@@ -318,19 +318,28 @@ def main():
     for o in all_offers:
         log.debug("[raw] %s — %s", o["title"], o["source"])
 
-    # LBA est déjà filtré finement (ROME + diplôme), Adzuna déjà filtré par
-    # son propre paramètre what="alternance" (le mot apparaît dans l'annonce,
-    # pas forcément dans le titre) : on leur fait confiance tels quels.
-    # Jooble a une recherche plein-texte peu fiable : on exige que le titre
-    # contienne "alternance" ou "apprenti" pour éliminer les faux positifs
-    # (infirmier, office manager, etc.).
+    # LBA est déjà filtré finement (ROME + diplôme) : on lui fait confiance.
+    # Adzuna/Jooble ont des filtres moins fiables (catégorie ML imparfaite,
+    # recherche plein-texte) : on exige que le titre contienne À LA FOIS un
+    # mot-clé de type de contrat ET un mot-clé informatique, pour éliminer
+    # les faux positifs hors-sujet (community manager, événementiel,
+    # commercial, infirmier...) tout en gardant impérativement les offres IT.
+    TYPE_KEYWORDS = ("alternance", "apprenti", "stage")
+    IT_KEYWORDS = (
+        "informatique", "développeur", "developpeur", "dev ", "web", "mobile",
+        "logiciel", "système", "systeme", "réseau", "reseau", "données",
+        "donnees", "data", "cyber", "fullstack", "full-stack", "backend",
+        "back-end", "frontend", "front-end", "devops", "programmeur"
+    )
     filtered_offers = []
     for offer in all_offers:
-        if not offer["source"].lower().startswith("jooble"):
+        if offer["source"] == "La Bonne Alternance":
             filtered_offers.append(offer)
             continue
         title_lower = offer["title"].lower()
-        if "alternance" in title_lower or "apprenti" in title_lower or "stage" in title_lower:
+        has_type = any(k in title_lower for k in TYPE_KEYWORDS)
+        has_it = any(k in title_lower for k in IT_KEYWORDS)
+        if has_type and has_it:
             filtered_offers.append(offer)
 
     new_offers = [o for o in filtered_offers if o["id"] not in seen_ids]
